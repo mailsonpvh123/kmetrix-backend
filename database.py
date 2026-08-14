@@ -7,8 +7,12 @@ from dotenv import load_dotenv
 # Carrega as variáveis do arquivo .env (quando rodar localmente)
 load_dotenv()
 
-# Pega a URL do banco de dados (O EasyPanel injetará isso automaticamente se configurado lá)
+# Pega a URL do banco de dados injetada pelo EasyPanel
 SQLALCHEMY_DATABASE_URL = os.getenv("DATABASE_URL")
+
+# Correção automática: SQLAlchemy moderno exige 'postgresql://' em vez de 'postgres://'
+if SQLALCHEMY_DATABASE_URL and SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
+    SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # Cria o motor de conexão
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
@@ -26,3 +30,4 @@ def get_db():
         yield db
     finally:
         db.close()
+        
