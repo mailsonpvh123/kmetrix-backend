@@ -114,12 +114,15 @@ def registrar_corrida(turno_id: int, corrida: CorridaCreate, db: Session = Depen
     db.commit()
     return {"mensagem": "Corrida registrada!", "saldo_atual": turno.meta_diaria}
 
-@app.put("/turnos/{turno_id}/encerrar", dependencies=[Depends(validar_api_key)])
-def encerrar_turno(turno_id: int, dados: TurnoEncerrar, db: Session = Depends(get_db)):
-    turno = db.query(models.Turno).filter(models.Turno.id == turno_id, models.Turno.ativo == True).first()
+@app.post("/turnos/encerrar", dependencies=[Depends(validar_api_key)])
+def encerrar_turno(dados: TurnoEncerrar, db: Session = Depends(get_db)):
+    # Procura o turno atual que está aberto
+    turno = db.query(models.Turno).filter(models.Turno.ativo == True).first()
+    
     if not turno:
-        raise HTTPException(status_code=404, detail="Turno não encontrado.")
+        raise HTTPException(status_code=404, detail="Nenhum turno ativo encontrado no banco de dados.")
 
+    # Atualiza os dados de encerramento
     turno.km_final = dados.km_final
     km_total = dados.km_final - turno.km_inicial
     turno.km_vazio = km_total - turno.km_pago
@@ -127,7 +130,7 @@ def encerrar_turno(turno_id: int, dados: TurnoEncerrar, db: Session = Depends(ge
     turno.data_fim = datetime.now(timezone.utc)
     
     db.commit()
-    return {"mensagem": "Turno encerrado!", "lucro_final": turno.meta_diaria}
+    return {"mensagem": "Turno encerrado com sucesso!", "lucro_final": turno.meta_diaria}
 
 # --- NOVAS ROTAS DE LEITURA (Para o App Mobile) ---
 
