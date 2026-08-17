@@ -1,5 +1,6 @@
 from fastapi import FastAPI, Depends, HTTPException, Security
 from fastapi.security.api_key import APIKeyHeader
+from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy.orm import Session
 from pydantic_settings import BaseSettings
 from pydantic import BaseModel
@@ -40,6 +41,17 @@ app = FastAPI(
 )
 
 # ==========================================
+# CONFIGURAÇÃO DE CORS (Essencial para o App conectar)
+# ==========================================
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Permite requisições de qualquer origem do front-end
+    allow_credentials=True,
+    allow_methods=["*"],  # Permite todos os métodos (GET, POST, PUT, DELETE, OPTIONS)
+    allow_headers=["*"],  # Permite todos os cabeçalhos (incluindo o nosso X-API-Key)
+)
+
+# ==========================================
 # SCHEMAS (Validação de Dados)
 # ==========================================
 class TurnoCreate(BaseModel):
@@ -61,14 +73,14 @@ class CorridaCreate(BaseModel):
     lucro_liquido: float
 
 # ==========================================
-# ROTAS DA API (Agora protegidas pela API Key)
+# ROTAS DA API
 # ==========================================
 
 @app.get("/")
 def read_root():
     return {"status": "online", "app": "KMetrix API", "seguranca": "Ativa"}
 
-# --- ROTAS DE ESCRITA (Que você já tinha) ---
+# --- ROTAS DE ESCRITA ---
 
 @app.post("/turnos/iniciar", dependencies=[Depends(validar_api_key)])
 def iniciar_turno(turno: TurnoCreate, db: Session = Depends(get_db)):
@@ -132,7 +144,7 @@ def encerrar_turno(dados: TurnoEncerrar, db: Session = Depends(get_db)):
     db.commit()
     return {"mensagem": "Turno encerrado com sucesso!", "lucro_final": turno.meta_diaria}
 
-# --- NOVAS ROTAS DE LEITURA (Para o App Mobile) ---
+# --- ROTAS DE LEITURA (Para o App Mobile) ---
 
 @app.get("/turnos/ativo", dependencies=[Depends(validar_api_key)])
 def buscar_turno_ativo(db: Session = Depends(get_db)):
