@@ -10,20 +10,13 @@ class Driver(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(100), nullable=False)
-    
-    # Preparação para o futuro comercial (Login por email/senha)
     email = Column(String(150), unique=True, nullable=False, index=True)
     hashed_password = Column(String(255), nullable=True) 
-    
-    # Autenticação Fase 1 (API Key única por usuário)
     api_key = Column(String(255), unique=True, nullable=False, index=True)
-    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Relacionamentos
     financial_profile = relationship("FinancialProfile", back_populates="driver", uselist=False, cascade="all, delete")
     shifts = relationship("Shift", back_populates="driver", cascade="all, delete")
-
 
 class FinancialProfile(Base):
     __tablename__ = "financial_profiles"
@@ -41,7 +34,6 @@ class FinancialProfile(Base):
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     driver = relationship("Driver", back_populates="financial_profile")
-
 
 class Shift(Base):
     __tablename__ = "shifts"
@@ -62,7 +54,6 @@ class Shift(Base):
     logs = relationship("ShiftLog", back_populates="shift", cascade="all, delete")
     rides = relationship("Ride", back_populates="shift", cascade="all, delete")
 
-
 class ShiftLog(Base):
     __tablename__ = "shift_logs"
 
@@ -77,13 +68,15 @@ class ShiftLog(Base):
 
     shift = relationship("Shift", back_populates="logs")
 
-
 class Ride(Base):
     __tablename__ = "rides"
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     shift_id = Column(UUID(as_uuid=True), ForeignKey("shifts.id", ondelete="CASCADE"))
     platform = Column(String(50), nullable=False)
+    
+    # NOVO: Status da corrida para podermos separar o que foi ganho real do que foi recusado
+    status = Column(String(20), default="ACCEPTED", nullable=False) 
     
     profit = Column(Numeric(10, 2), nullable=False)
     distance_km = Column(Numeric(10, 2), nullable=True)
