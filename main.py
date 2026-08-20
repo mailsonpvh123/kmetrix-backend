@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
+from datetime import datetime, timezone
 import secrets
 import hashlib 
 
@@ -96,14 +97,14 @@ def get_financial_profile(
     db: Session = Depends(get_db)
 ):
     """
-    Consulta os custos e metas (Entrevista de Custos) cadastrados do motorista logado.
+    Consulta os custos e metas cadastrados do motorista logado.
     """
     profile = db.query(models.FinancialProfile).filter(models.FinancialProfile.driver_id == current_driver.id).first()
     
     if not profile:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail="Perfil financeiro não encontrado. Envie os dados para criar um."
+            detail="Perfil financeiro não encontrado."
         )
         
     return profile
@@ -116,16 +117,13 @@ def update_financial_profile(
 ):
     """
     Cria ou atualiza (UPSERT) a entrevista de custos do motorista logado.
-    Garante que só exista um perfil ativo por motorista.
     """
     profile = db.query(models.FinancialProfile).filter(models.FinancialProfile.driver_id == current_driver.id).first()
     
     if profile:
-        # Se já existe, atualiza os campos com os novos valores enviados pelo app
         for key, value in profile_data.model_dump().items():
             setattr(profile, key, value)
     else:
-        # Se não existe, cria um novo vinculando ao ID do motorista
         profile = models.FinancialProfile(
             **profile_data.model_dump(),
             driver_id=current_driver.id
@@ -136,3 +134,131 @@ def update_financial_profile(
     db.refresh(profile)
     
     return profile
+
+# ------------------------------------------
+# GESTÃO DE TURNOS (SHIFTS)
+# ------------------------------------------
+
+@app.get("/shifts/current", response_model=schemas.ShiftResponse, tags=["Gestão de Turnos"])
+def get_current_shift(
+    current_driver: models.Driver = Depends(get_current_driver), 
+    db: Session = Depends(get_db)
+):
+    """
+    Retorna o turno atual (ATIVO ou PAUSADO). Ideal para quando o app for reaberto.
+    """
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id,
+        models.Shift.status.in_(["ACTIVE", "PAUSED"])
+    ).first()
+
+    if not shift:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Nenhum turno em andamento.")
+    return shift
+
+
+@app.post("/shifts/start", response_model=schemas.ShiftResponse, status_code=status.HTTP_201_CREATED, tags=["Gestão de Turnos"])
+def start_shift(
+    current_driver: models.Driver = Depends(get_current_driver), 
+    db: Session = Depends(get_db)
+):
+    """
+    Inicia um novo turno. Bloqueia se já houver um turno aberto.
+    """
+    active_shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id,
+        models.Shift.status.in_(["ACTIVE", "PAUSED"])
+    ).first()
+
+    if active_shift:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail="Já existe um turno aberto. Encerre-o antes de iniciar outro."
+        )
+
+    # Cria o turno
+    new_shift = models.Shift(driver_id=current_driver.id, status="ACTIVE")
+    db.add(new_shift)
+    db.commit()
+    db.refresh(new_shift)
+
+    # Registra o log inicial
+    log = models.ShiftLog(shift_id=new_shift.id, event_type="START")
+    db.add(log)
+    db.commit()
+
+    return new_shift
+
+
+@app.post("/shifts/pause", response_model=schemas.ShiftResponse, tags=["Gestão de Turnos"])
+def pause_shift(
+    current_driver: models.Driver = Depends(get_current_driver), 
+    db: Session = Depends(get_db)
+):
+    """
+    Pausa o turno atual (ex: horário de almoço ou abastecimento).
+    """
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id,
+        models.Shift.status == "ACTIVE"
+    ).first()
+
+    if not shift:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum turno ATIVO encontrado para pausar.")
+
+    shift.status = "PAUSED"
+    log = models.ShiftLog(shift_id=shift.id, event_type="PAUSE")
+    db.add(log)
+    db.commit()
+    db.refresh(shift)
+    return shift
+
+
+@app.post("/shifts/resume", response_model=schemas.ShiftResponse, tags=["Gestão de Turnos"])
+def resume_shift(
+    current_driver: models.Driver = Depends(get_current_driver), 
+    db: Session = Depends(get_db)
+):
+    """
+    Retoma um turno que estava pausado.
+    """
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_current_driver.id if 'current_current_driver' in locals() else current_driver.id,
+        models.Shift.status == "PAUSED"
+    ).first()
+
+    if not shift:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum turno PAUSADO encontrado para retomar.")
+
+    shift.status = "ACTIVE"
+    log = models.ShiftLog(shift_id=shift.id, event_type="RESUME")
+    db.add(log)
+    db.commit()
+    db.refresh(shift)
+    return shift
+
+
+@app.post("/shifts/end", response_model=schemas.ShiftResponse, tags=["Gestão de Turnos"])
+def end_shift(
+    current_driver: models.Driver = Depends(get_current_driver), 
+    db: Session = Depends(get_db)
+):
+    """
+    Encerra o turno de forma definitiva e marca a hora de saída.
+    """
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id,
+        models.Shift.status.in_(["ACTIVE", "PAUSED"])
+    ).first()
+
+    if not shift:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Nenhum turno em andamento encontrado para encerrar.")
+
+    shift.status = "ENDED"
+    shift.end_time = datetime.now(timezone.utc)
+    
+    log = models.ShiftLog(shift_id=shift.id, event_type="END")
+    db.add(log)
+    db.commit()
+    db.refresh(shift)
+    return shift
