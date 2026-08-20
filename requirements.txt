@@ -1,7 +1,7 @@
 fastapi
-uvicorn
-python-dotenv
-pydantic
-pydantic-settings
+uvicorn[standard]
 sqlalchemy
 psycopg2-binary
+pydantic
+pydantic-settings
+alembic
