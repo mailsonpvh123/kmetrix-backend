@@ -54,10 +54,16 @@ class ShiftLogCreate(BaseModel):
     longitude: Optional[float] = None
     is_paid_route: bool = False
 
+# NOVO: Schema para o envio do GPS a cada X segundos
+class GpsTickCreate(BaseModel):
+    latitude: float = Field(..., description="Latitude atual")
+    longitude: float = Field(..., description="Longitude atual")
+    is_paid_route: bool = Field(default=False, description="True se estiver com passageiro/rota")
+
 class RideCreate(BaseModel):
     platform: str = Field(..., description="Uber, 99, inDrive")
     status: str = Field(default="ACCEPTED", description="ACCEPTED, REJECTED, CANCELED")
-    profit: float = Field(..., description="Valor da corrida")
+    profit: float = Field(..., description="Valor líquido da corrida")
     distance_km: Optional[float] = None
     duration_minutes: Optional[int] = None
     alerts: Optional[Dict[str, Any]] = None 
@@ -68,7 +74,6 @@ class RideResponse(RideCreate):
     timestamp: datetime
     model_config = ConfigDict(from_attributes=True)
 
-# NOVO: Resposta mastigada para a tela do Radar de Ganhos
 class RadarResponse(BaseModel):
     shift_id: UUID
     daily_fixed_cost: float
