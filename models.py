@@ -10,7 +10,14 @@ class Driver(Base):
 
     id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     name = Column(String(100), nullable=False)
+    
+    # Preparação para o futuro comercial (Login por email/senha)
+    email = Column(String(150), unique=True, nullable=False, index=True)
+    hashed_password = Column(String(255), nullable=True) 
+    
+    # Autenticação Fase 1 (API Key única por usuário)
     api_key = Column(String(255), unique=True, nullable=False, index=True)
+    
     created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relacionamentos
