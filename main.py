@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 import secrets
 import hashlib 
+import math # Para os cálculos de precisão do GPS
 
 from database import engine, Base, get_db
 import models
@@ -13,7 +14,7 @@ import schemas
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="KMetrix API", version="1.1.0")
+app = FastAPI(title="KMetrix API", version="1.2.0")
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
@@ -27,10 +28,19 @@ def get_current_driver(
         raise HTTPException(status_code=401, detail="Acesso negado. X-API-Key inválida.")
     return driver
 
+# Função matemática (Haversine) para calcular distância em KM entre duas coordenadas GPS
+def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    R = 6371.0 # Raio da Terra em KM
+    dlat = math.radians(lat2 - lat1)
+    dlon = math.radians(lon2 - lon1)
+    a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return R * c
+
 # === ROTAS PÚBLICAS ===
 @app.get("/", tags=["Health Check"])
 def read_root():
-    return {"status": "KMetrix API online."}
+    return {"status": "KMetrix API online e recebendo coordenadas."}
 
 @app.post("/drivers/", response_model=schemas.DriverResponse, status_code=201, tags=["Setup"])
 def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db)):
@@ -39,10 +49,7 @@ def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db)):
 
     hashed_pwd = hashlib.sha256(driver.password.encode()).hexdigest()
     new_driver = models.Driver(
-        name=driver.name,
-        email=driver.email,
-        hashed_password=hashed_pwd,
-        api_key=secrets.token_hex(16)
+        name=driver.name, email=driver.email, hashed_password=hashed_pwd, api_key=secrets.token_hex(16)
     )
     db.add(new_driver)
     db.commit()
@@ -110,7 +117,7 @@ def resume_shift(current_driver: models.Driver = Depends(get_current_driver), db
 @app.post("/shifts/end", response_model=schemas.ShiftResponse, tags=["Turnos"])
 def end_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
     shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
-    if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto para encerrar.")
+    if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto.")
     shift.status = "ENDED"
     shift.end_time = datetime.now(timezone.utc)
     db.add(models.ShiftLog(shift_id=shift.id, event_type="END"))
@@ -118,35 +125,88 @@ def end_shift(current_driver: models.Driver = Depends(get_current_driver), db: S
     db.refresh(shift)
     return shift
 
-# === RADAR DE GANHOS E HISTÓRICO (NOVAS ROTAS) ===
+# === INGESTÃO DE DADOS (GPS e Corridas Lidas) ===
+
+@app.post("/shifts/gps", tags=["Ingestão de Dados"])
+def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
+    """
+    O app bate aqui a cada X segundos. O back-end calcula a distância real percorrida e soma no Km Vazio ou Pago.
+    """
+    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status == "ACTIVE").first()
+    if not shift: raise HTTPException(status_code=400, detail="Turno inativo. GPS ignorado.")
+
+    # Busca o último registro de GPS deste turno para calcular a distância
+    last_log = db.query(models.ShiftLog).filter(
+        models.ShiftLog.shift_id == shift.id,
+        models.ShiftLog.event_type == "GPS_TICK",
+        models.ShiftLog.latitude.isnot(None),
+        models.ShiftLog.longitude.isnot(None)
+    ).order_by(models.ShiftLog.timestamp.desc()).first()
+
+    distance = 0.0
+    if last_log:
+        distance = calculate_distance(float(last_log.latitude), float(last_log.longitude), gps_data.latitude, gps_data.longitude)
+        
+        # Só contabiliza se a distância for razoável (evita bugs de GPS pulando para a África e voltando)
+        if distance < 5.0:  # Assumindo que num "tick" curto o carro andou no máximo 5km
+            shift.total_km = float(shift.total_km) + distance
+            if gps_data.is_paid_route:
+                shift.paid_km = float(shift.paid_km) + distance
+            else:
+                shift.empty_km = float(shift.empty_km) + distance
+
+    # Salva o novo log
+    new_log = models.ShiftLog(
+        shift_id=shift.id,
+        event_type="GPS_TICK",
+        latitude=gps_data.latitude,
+        longitude=gps_data.longitude,
+        is_paid_route=gps_data.is_paid_route
+    )
+    db.add(new_log)
+    db.commit()
+
+    return {"msg": "GPS registrado", "distance_added_km": round(distance, 3)}
+
+@app.post("/rides/", response_model=schemas.RideResponse, status_code=201, tags=["Ingestão de Dados"])
+def create_ride(ride: schemas.RideCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
+    """
+    O app lê a tela e envia os dados da corrida (aceita, recusada, cancelada).
+    """
+    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
+    if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto para atrelar a corrida.")
+
+    new_ride = models.Ride(
+        shift_id=shift.id,
+        platform=ride.platform,
+        status=ride.status,
+        profit=ride.profit,
+        distance_km=ride.distance_km,
+        duration_minutes=ride.duration_minutes,
+        alerts=ride.alerts
+    )
+    db.add(new_ride)
+    db.commit()
+    db.refresh(new_ride)
+    return new_ride
+
+# === RADAR E HISTÓRICO ===
 
 @app.get("/shifts/current/radar", response_model=schemas.RadarResponse, tags=["Contabilidade"])
 def get_earnings_radar(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    """
-    Calcula o Radar de Ganhos: 
-    Pega os custos fixos, divide por 30 para achar a diária (fictícia), e abate do lucro ganho nas corridas ACEITAS hoje.
-    """
-    shift = db.query(models.Shift).filter(
-        models.Shift.driver_id == current_driver.id, 
-        models.Shift.status.in_(["ACTIVE", "PAUSED"])
-    ).first()
-    
+    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
     if not shift: raise HTTPException(status_code=404, detail="Inicie um turno para ver o radar.")
 
     profile = db.query(models.FinancialProfile).filter(models.FinancialProfile.driver_id == current_driver.id).first()
     if not profile: raise HTTPException(status_code=400, detail="Configure o perfil financeiro primeiro.")
 
-    # 1. Calcula custo diário (Aluguel + Seguro + Outros fixos / 30)
     monthly_costs = float(profile.rent_cost) + float(profile.insurance_cost) + float(profile.other_fixed_costs)
     daily_fixed_cost = monthly_costs / 30.0
 
-    # 2. Soma apenas o lucro das corridas com status "ACCEPTED" neste turno
     gross_profit = db.query(sa_func.sum(models.Ride.profit)).filter(
-        models.Ride.shift_id == shift.id,
-        models.Ride.status == "ACCEPTED"
+        models.Ride.shift_id == shift.id, models.Ride.status == "ACCEPTED"
     ).scalar() or 0.0
 
-    # 3. Matemática do Radar
     current_net_balance = float(gross_profit) - daily_fixed_cost
 
     return {
@@ -158,26 +218,11 @@ def get_earnings_radar(current_driver: models.Driver = Depends(get_current_drive
     }
 
 @app.get("/rides/history", response_model=List[schemas.RideResponse], tags=["Histórico de Corridas"])
-def get_ride_history(
-    platform: Optional[str] = Query(None, description="Filtrar por app: Uber, 99, inDrive"),
-    status: Optional[str] = Query(None, description="Filtrar por status: ACCEPTED, REJECTED, CANCELED"),
-    current_driver: models.Driver = Depends(get_current_driver), 
-    db: Session = Depends(get_db)
-):
-    """
-    Retorna o histórico de corridas. 
-    Permite filtrar por plataforma e apenas pelas corridas aceitas.
-    """
-    # Buscamos todos os turnos deste motorista primeiro
+def get_ride_history(platform: Optional[str] = Query(None), status: Optional[str] = Query(None), current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
     shifts = db.query(models.Shift.id).filter(models.Shift.driver_id == current_driver.id).subquery()
-    
-    # Construímos a query base olhando apenas para corridas dos turnos do motorista
     query = db.query(models.Ride).filter(models.Ride.shift_id.in_(shifts))
     
-    # Aplica os filtros se eles foram enviados na requisição
-    if platform:
-        query = query.filter(models.Ride.platform == platform)
-    if status:
-        query = query.filter(models.Ride.status == status)
+    if platform: query = query.filter(models.Ride.platform == platform)
+    if status: query = query.filter(models.Ride.status == status)
         
     return query.order_by(models.Ride.timestamp.desc()).all()
