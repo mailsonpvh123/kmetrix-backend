@@ -1,49 +1,87 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, ForeignKey
-from sqlalchemy.sql import func
+import uuid
+from sqlalchemy import Column, String, Numeric, Boolean, Integer, DateTime, ForeignKey
+from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
 from database import Base
 
-class Turno(Base):
-    __tablename__ = "turnos"
+class Driver(Base):
+    __tablename__ = "drivers"
 
-    id = Column(Integer, primary_key=True, index=True)
-    ativo = Column(Boolean, default=True)
-    meta_diaria = Column(Float, default=-150.0) # O custo fixo do aluguel do HR-V
-    km_inicial = Column(Float, nullable=True)
-    km_final = Column(Float, nullable=True)
-    km_vazio = Column(Float, default=0.0)
-    km_pago = Column(Float, default=0.0)
-    data_inicio = Column(DateTime(timezone=True), server_default=func.now())
-    data_fim = Column(DateTime(timezone=True), nullable=True)
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name = Column(String(100), nullable=False)
+    api_key = Column(String(255), unique=True, nullable=False, index=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
 
     # Relacionamentos
-    corridas = relationship("Corrida", back_populates="turno")
-    despesas = relationship("Despesa", back_populates="turno")
+    financial_profile = relationship("FinancialProfile", back_populates="driver", uselist=False, cascade="all, delete")
+    shifts = relationship("Shift", back_populates="driver", cascade="all, delete")
 
-class Despesa(Base):
-    __tablename__ = "despesas"
 
-    id = Column(Integer, primary_key=True, index=True)
-    turno_id = Column(Integer, ForeignKey("turnos.id"))
-    categoria = Column(String, index=True) # Ex: Combustível, Alimentação, Banheiro
-    valor = Column(Float, nullable=False)
-    data_hora = Column(DateTime(timezone=True), server_default=func.now())
+class FinancialProfile(Base):
+    __tablename__ = "financial_profiles"
 
-    # Relacionamento
-    turno = relationship("Turno", back_populates="despesas")
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    driver_id = Column(UUID(as_uuid=True), ForeignKey("drivers.id", ondelete="CASCADE"), unique=True)
+    
+    rent_cost = Column(Numeric(10, 2), default=0.00)
+    insurance_cost = Column(Numeric(10, 2), default=0.00)
+    other_fixed_costs = Column(Numeric(10, 2), default=0.00)
+    fuel_cost_per_liter = Column(Numeric(10, 2), default=0.00)
+    vehicle_consumption = Column(Numeric(10, 2), default=0.00)
+    target_per_km = Column(Numeric(10, 2), default=0.00)
+    target_per_hour = Column(Numeric(10, 2), default=0.00)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
-class Corrida(Base):
-    __tablename__ = "corridas"
+    driver = relationship("Driver", back_populates="financial_profile")
 
-    id = Column(Integer, primary_key=True, index=True)
-    turno_id = Column(Integer, ForeignKey("turnos.id"))
-    plataforma = Column(String, index=True) # Uber ou 99
-    status = Column(String, index=True) # Recebida, Aceita, Ignorada
-    distancia_km = Column(Float, nullable=False)
-    tempo_minutos = Column(Integer, nullable=False)
-    valor_bruto = Column(Float, nullable=False)
-    lucro_liquido = Column(Float, nullable=False) # Valor bruto - custo do combustível do HR-V
-    data_hora = Column(DateTime(timezone=True), server_default=func.now())
 
-    # Relacionamento
-    turno = relationship("Turno", back_populates="corridas")
+class Shift(Base):
+    __tablename__ = "shifts"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    driver_id = Column(UUID(as_uuid=True), ForeignKey("drivers.id", ondelete="CASCADE"))
+    status = Column(String(20), nullable=False, default="ACTIVE")
+    
+    start_time = Column(DateTime(timezone=True), server_default=func.now())
+    end_time = Column(DateTime(timezone=True), nullable=True)
+    
+    total_km = Column(Numeric(10, 2), default=0.00)
+    paid_km = Column(Numeric(10, 2), default=0.00)
+    empty_km = Column(Numeric(10, 2), default=0.00)
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    driver = relationship("Driver", back_populates="shifts")
+    logs = relationship("ShiftLog", back_populates="shift", cascade="all, delete")
+    rides = relationship("Ride", back_populates="shift", cascade="all, delete")
+
+
+class ShiftLog(Base):
+    __tablename__ = "shift_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    shift_id = Column(UUID(as_uuid=True), ForeignKey("shifts.id", ondelete="CASCADE"))
+    event_type = Column(String(50), nullable=False)
+    
+    latitude = Column(Numeric(9, 6), nullable=True)
+    longitude = Column(Numeric(9, 6), nullable=True)
+    is_paid_route = Column(Boolean, default=False)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    shift = relationship("Shift", back_populates="logs")
+
+
+class Ride(Base):
+    __tablename__ = "rides"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    shift_id = Column(UUID(as_uuid=True), ForeignKey("shifts.id", ondelete="CASCADE"))
+    platform = Column(String(50), nullable=False)
+    
+    profit = Column(Numeric(10, 2), nullable=False)
+    distance_km = Column(Numeric(10, 2), nullable=True)
+    duration_minutes = Column(Integer, nullable=True)
+    alerts = Column(JSONB, nullable=True)
+    timestamp = Column(DateTime(timezone=True), server_default=func.now())
+
+    shift = relationship("Shift", back_populates="rides")
