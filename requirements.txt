@@ -3,5 +3,7 @@ uvicorn[standard]
 sqlalchemy
 psycopg2-binary
 pydantic
+pydantic[email]
 pydantic-settings
 alembic
+email-validator
