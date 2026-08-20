@@ -1,4 +1,4 @@
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, EmailStr
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from uuid import UUID
@@ -26,11 +26,13 @@ class FinancialProfileResponse(FinancialProfileBase):
 # --- SCHEMAS PARA O MOTORISTA ---
 class DriverCreate(BaseModel):
     name: str = Field(..., min_length=2, max_length=100)
-    # A api_key será gerada pelo backend, o app não envia
+    email: EmailStr = Field(..., description="E-mail de login para uso comercial no futuro")
+    password: str = Field(..., min_length=6, description="Senha do usuário")
 
 class DriverResponse(BaseModel):
     id: UUID
     name: str
+    email: str
     api_key: str
     created_at: datetime
     
@@ -38,7 +40,7 @@ class DriverResponse(BaseModel):
 
 # --- SCHEMAS PARA O TURNO (SHIFT) ---
 class ShiftCreate(BaseModel):
-    pass # O turno inicia vazio, apenas atrelado ao motorista logado
+    pass 
 
 class ShiftResponse(BaseModel):
     id: UUID
@@ -65,7 +67,7 @@ class RideCreate(BaseModel):
     profit: float = Field(..., description="Valor líquido da corrida extraído da tela")
     distance_km: Optional[float] = None
     duration_minutes: Optional[int] = None
-    alerts: Optional[Dict[str, Any]] = None # JSON flexível para alertas visuais
+    alerts: Optional[Dict[str, Any]] = None 
 
 class RideResponse(RideCreate):
     id: UUID
@@ -73,4 +75,3 @@ class RideResponse(RideCreate):
     timestamp: datetime
     
     model_config = ConfigDict(from_attributes=True)
-  
