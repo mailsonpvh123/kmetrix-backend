@@ -3,20 +3,23 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, declarative_base
 
 # Puxa a URL de conexão do ambiente do EasyPanel. 
-# Se não encontrar, usa um SQLite local temporário para evitar crashes em testes.
+# Se não encontrar, usa um SQLite local temporário.
 SQLALCHEMY_DATABASE_URL = os.getenv(
     "DATABASE_URL", 
     "sqlite:///./kmetrix_dev.db"
 )
 
-# Se estiver usando postgres, a URL geralmente começa com postgresql://
+# Correção Crítica de Deploy: 
+# O SQLAlchemy moderno exige que a string comece com 'postgresql://' e não apenas 'postgres://'
+if SQLALCHEMY_DATABASE_URL.startswith("postgres://"):
+    SQLALCHEMY_DATABASE_URL = SQLALCHEMY_DATABASE_URL.replace("postgres://", "postgresql://", 1)
+
 engine = create_engine(SQLALCHEMY_DATABASE_URL)
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 Base = declarative_base()
 
-# Dependência para injetar a sessão do banco de dados nas rotas
 def get_db():
     db = SessionLocal()
     try:
