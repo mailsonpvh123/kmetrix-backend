@@ -1,183 +1,94 @@
-from fastapi import FastAPI, Depends, HTTPException, Security
-from fastapi.security.api_key import APIKeyHeader
-from fastapi.middleware.cors import CORSMiddleware
+from fastapi import FastAPI, Depends, HTTPException, Security, status
+from fastapi.security import APIKeyHeader
 from sqlalchemy.orm import Session
-from pydantic_settings import BaseSettings
-from pydantic import BaseModel
-from datetime import datetime, timezone
+import secrets
+import hashlib # Apenas para um hash simples agora. No futuro, usaremos Passlib/Bcrypt.
 
+# Importações locais do projeto
+from database import engine, Base, get_db
 import models
-from database import engine, get_db
+import schemas
 
-# ==========================================
-# CONFIGURAÇÕES DE AMBIENTE E SEGURANÇA
-# ==========================================
-class Settings(BaseSettings):
-    database_url: str
-    domain_url: str
-    encrypted_key: str
+# 1. Cria as tabelas no banco de dados
+Base.metadata.create_all(bind=engine)
 
-    class Config:
-        env_file = ".env"
-
-settings = Settings()
-
-# Configuração da Chave de Segurança no Cabeçalho (Header)
-api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
-
-def validar_api_key(api_key: str = Security(api_key_header)):
-    if api_key != settings.encrypted_key:
-        raise HTTPException(status_code=403, detail="Acesso negado. Chave inválida.")
-    return api_key
-
-# Cria as tabelas no banco de dados
-models.Base.metadata.create_all(bind=engine)
-
-# Inicializa a API
+# 2. Inicializa o FastAPI
 app = FastAPI(
     title="KMetrix API",
-    description="Motor de cálculo de rentabilidade e rastreamento para motoristas.",
-    version="1.1.0"
+    description="Backend tático e financeiro para motoristas de app.",
+    version="1.0.0"
 )
 
-# ==========================================
-# CONFIGURAÇÃO DE CORS (Essencial para o App conectar)
-# ==========================================
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Permite requisições de qualquer origem do front-end
-    allow_credentials=True,
-    allow_methods=["*"],  # Permite todos os métodos (GET, POST, PUT, DELETE, OPTIONS)
-    allow_headers=["*"],  # Permite todos os cabeçalhos (incluindo o nosso X-API-Key)
-)
+# 3. Configuração de Segurança Multitenant (Cada motorista tem sua X-API-Key)
+API_KEY_NAME = "X-API-Key"
+api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
+
+def get_current_driver(
+    api_key_header: str = Security(api_key_header), 
+    db: Session = Depends(get_db)
+) -> models.Driver:
+    """
+    Middleware: Busca o motorista no banco de dados usando a chave da requisição.
+    Garante isolamento total de dados para quando o app for comercializado.
+    """
+    driver = db.query(models.Driver).filter(models.Driver.api_key == api_key_header).first()
+    if not driver:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Acesso negado. X-API-Key inválida ou inexistente.",
+        )
+    return driver
+
 
 # ==========================================
-# SCHEMAS (Validação de Dados)
-# ==========================================
-class TurnoCreate(BaseModel):
-    km_inicial: float
-
-class TurnoEncerrar(BaseModel):
-    km_final: float
-
-class DespesaCreate(BaseModel):
-    categoria: str
-    valor: float
-
-class CorridaCreate(BaseModel):
-    plataforma: str
-    status: str
-    distancia_km: float
-    tempo_minutos: int
-    valor_bruto: float
-    lucro_liquido: float
-
-# ==========================================
-# ROTAS DA API
+# ROTAS PÚBLICAS 
 # ==========================================
 
-@app.get("/")
+@app.get("/", tags=["Health Check"])
 def read_root():
-    return {"status": "online", "app": "KMetrix API", "seguranca": "Ativa"}
+    return {"status": "KMetrix API está online e pronta para escalar."}
 
-# --- ROTAS DE ESCRITA ---
+@app.post("/drivers/", response_model=schemas.DriverResponse, status_code=status.HTTP_201_CREATED, tags=["Setup / Autenticação"])
+def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db)):
+    """
+    Cria um novo motorista. Se for comercializado, milhares de usuários baterão aqui.
+    Retorna a X-API-Key que o app deverá salvar no armazenamento local do celular.
+    """
+    # Verifica se o email já está em uso
+    existing_user = db.query(models.Driver).filter(models.Driver.email == driver.email).first()
+    if existing_user:
+         raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Este e-mail já está registrado.",
+        )
 
-@app.post("/turnos/iniciar", dependencies=[Depends(validar_api_key)])
-def iniciar_turno(turno: TurnoCreate, db: Session = Depends(get_db)):
-    turno_ativo = db.query(models.Turno).filter(models.Turno.ativo == True).first()
-    if turno_ativo:
-        raise HTTPException(status_code=400, detail="Já existe um turno ativo.")
-
-    novo_turno = models.Turno(km_inicial=turno.km_inicial, ativo=True, meta_diaria=-150.0)
-    db.add(novo_turno)
-    db.commit()
-    db.refresh(novo_turno)
-    return {"mensagem": "Turno iniciado!", "turno_id": novo_turno.id}
-
-@app.post("/turnos/{turno_id}/despesas", dependencies=[Depends(validar_api_key)])
-def lancar_despesa(turno_id: int, despesa: DespesaCreate, db: Session = Depends(get_db)):
-    turno = db.query(models.Turno).filter(models.Turno.id == turno_id, models.Turno.ativo == True).first()
-    if not turno:
-        raise HTTPException(status_code=404, detail="Turno não encontrado.")
-
-    nova_despesa = models.Despesa(turno_id=turno.id, categoria=despesa.categoria, valor=despesa.valor)
-    db.add(nova_despesa)
-    turno.meta_diaria -= despesa.valor # Aumenta o buraco a ser coberto
-    db.commit()
-    return {"mensagem": "Despesa registrada!", "nova_meta": turno.meta_diaria}
-
-@app.post("/turnos/{turno_id}/corridas", dependencies=[Depends(validar_api_key)])
-def registrar_corrida(turno_id: int, corrida: CorridaCreate, db: Session = Depends(get_db)):
-    turno = db.query(models.Turno).filter(models.Turno.id == turno_id, models.Turno.ativo == True).first()
-    if not turno:
-        raise HTTPException(status_code=404, detail="Turno não encontrado.")
-
-    nova_corrida = models.Corrida(
-        turno_id=turno.id, plataforma=corrida.plataforma, status=corrida.status,
-        distancia_km=corrida.distancia_km, tempo_minutos=corrida.tempo_minutos,
-        valor_bruto=corrida.valor_bruto, lucro_liquido=corrida.lucro_liquido
+    # Hash temporário simples para proteger a senha no banco na Fase 1
+    hashed_pwd = hashlib.sha256(driver.password.encode()).hexdigest()
+    
+    # Gera uma chave de API segura e única para este motorista
+    generated_api_key = secrets.token_hex(16)
+    
+    new_driver = models.Driver(
+        name=driver.name,
+        email=driver.email,
+        hashed_password=hashed_pwd,
+        api_key=generated_api_key
     )
-    db.add(nova_corrida)
-
-    if corrida.status.lower() == "aceita":
-        turno.km_pago += corrida.distancia_km
-        turno.meta_diaria += corrida.lucro_liquido # Abate do custo de R$ 150
-
+    db.add(new_driver)
     db.commit()
-    return {"mensagem": "Corrida registrada!", "saldo_atual": turno.meta_diaria}
-
-@app.post("/turnos/encerrar", dependencies=[Depends(validar_api_key)])
-def encerrar_turno(dados: TurnoEncerrar, db: Session = Depends(get_db)):
-    # Procura o turno atual que está aberto
-    turno = db.query(models.Turno).filter(models.Turno.ativo == True).first()
+    db.refresh(new_driver)
     
-    if not turno:
-        raise HTTPException(status_code=404, detail="Nenhum turno ativo encontrado no banco de dados.")
+    return new_driver
 
-    # Atualiza os dados de encerramento
-    turno.km_final = dados.km_final
-    km_total = dados.km_final - turno.km_inicial
-    turno.km_vazio = km_total - turno.km_pago
-    turno.ativo = False
-    turno.data_fim = datetime.now(timezone.utc)
-    
-    db.commit()
-    return {"mensagem": "Turno encerrado com sucesso!", "lucro_final": turno.meta_diaria}
 
-# --- ROTAS DE LEITURA (Para o App Mobile) ---
+# ==========================================
+# ROTAS PROTEGIDAS (Exigem X-API-Key no Header)
+# ==========================================
 
-@app.get("/turnos/ativo", dependencies=[Depends(validar_api_key)])
-def buscar_turno_ativo(db: Session = Depends(get_db)):
-    """Verifica se existe um turno rodando ao abrir o app."""
-    turno = db.query(models.Turno).filter(models.Turno.ativo == True).first()
-    if not turno:
-        return {"turno_ativo": False}
-    return {"turno_ativo": True, "turno_id": turno.id, "saldo_atual": turno.meta_diaria}
-
-@app.get("/turnos/{turno_id}/dashboard", dependencies=[Depends(validar_api_key)])
-def obter_dados_dashboard(turno_id: int, db: Session = Depends(get_db)):
-    """Fornece os dados mastigados para a tela estilo Power BI."""
-    turno = db.query(models.Turno).filter(models.Turno.id == turno_id).first()
-    if not turno:
-        raise HTTPException(status_code=404, detail="Turno não encontrado.")
-    
-    corridas_aceitas = db.query(models.Corrida).filter(
-        models.Corrida.turno_id == turno_id, 
-        models.Corrida.status == "Aceita"
-    ).all()
-
-    total_uber = sum(c.lucro_liquido for c in corridas_aceitas if c.plataforma == "Uber")
-    total_99 = sum(c.lucro_liquido for c in corridas_aceitas if c.plataforma == "99")
-
-    return {
-        "velocimetro_saldo": turno.meta_diaria,
-        "km_pago": turno.km_pago,
-        "faturamento_plataformas": {"Uber": total_uber, "99": total_99},
-        "total_corridas": len(corridas_aceitas)
-    }
-
-@app.get("/turnos/{turno_id}/historico", dependencies=[Depends(validar_api_key)])
-def obter_historico(turno_id: int, db: Session = Depends(get_db)):
-    """Retorna a lista completa para as abas de Histórico."""
-    corridas = db.query(models.Corrida).filter(models.Corrida.turno_id == turno_id).order_by(models.Corrida.data_hora.desc()).all()
-    return corridas
+@app.get("/me/", response_model=schemas.DriverResponse, tags=["Perfil do Motorista"])
+def get_my_profile(current_driver: models.Driver = Depends(get_current_driver)):
+    """
+    Retorna os dados do motorista autenticado.
+    Cada usuário verá APENAS os seus próprios dados, graças à X-API-Key.
+    """
+    return current_driver
