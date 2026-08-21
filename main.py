@@ -14,7 +14,7 @@ import schemas
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="KMetrix API", version="1.3.0")
+app = FastAPI(title="KMetrix API", version="1.3.1")
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
@@ -55,26 +55,16 @@ def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db)):
     db.refresh(new_driver)
     return new_driver
 
-# NOVO: Rota de Autenticação / Login
 @app.post("/auth/login", response_model=schemas.LoginResponse, tags=["Setup"])
 def login_driver(credentials: schemas.DriverLogin, db: Session = Depends(get_db)):
-    """
-    Autentica um motorista existente e devolve a X-API-Key para ser salva no celular.
-    """
-    # 1. Busca o motorista pelo e-mail
     driver = db.query(models.Driver).filter(models.Driver.email == credentials.email).first()
-    
     if not driver:
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
 
-    # 2. Aplica o mesmo hash na senha enviada para comparação
     hashed_pwd = hashlib.sha256(credentials.password.encode()).hexdigest()
-    
-    # 3. Compara com a senha salva no banco
     if driver.hashed_password != hashed_pwd:
         raise HTTPException(status_code=401, detail="Credenciais inválidas.")
 
-    # 4. Retorna a chave se o login for bem sucedido
     return {"api_key": driver.api_key}
 
 # === PERFIL FINANCEIRO ===
@@ -99,14 +89,26 @@ def update_financial_profile(profile_data: schemas.FinancialProfileCreate, curre
 # === GESTÃO DE TURNOS ===
 @app.get("/shifts/current", response_model=schemas.ShiftResponse, tags=["Turnos"])
 def get_current_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
+    # CORREÇÃO: Pega sempre o mais recente que não esteja encerrado
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status != "ENDED"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=404, detail="Nenhum turno ativo.")
     return shift
 
 @app.post("/shifts/start", response_model=schemas.ShiftResponse, status_code=201, tags=["Turnos"])
 def start_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    if db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first():
+    # CORREÇÃO: Impede abertura se houver qualquer turno não encerrado
+    existing_shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status != "ENDED"
+    ).first()
+    
+    if existing_shift:
         raise HTTPException(status_code=400, detail="Turno já aberto.")
+        
     new_shift = models.Shift(driver_id=current_driver.id, status="ACTIVE")
     db.add(new_shift)
     db.commit()
@@ -117,7 +119,11 @@ def start_shift(current_driver: models.Driver = Depends(get_current_driver), db:
 
 @app.post("/shifts/pause", response_model=schemas.ShiftResponse, tags=["Turnos"])
 def pause_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status == "ACTIVE").first()
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status == "ACTIVE"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=400, detail="Nenhum turno ATIVO para pausar.")
     shift.status = "PAUSED"
     db.add(models.ShiftLog(shift_id=shift.id, event_type="PAUSE"))
@@ -127,7 +133,11 @@ def pause_shift(current_driver: models.Driver = Depends(get_current_driver), db:
 
 @app.post("/shifts/resume", response_model=schemas.ShiftResponse, tags=["Turnos"])
 def resume_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status == "PAUSED").first()
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status == "PAUSED"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=400, detail="Nenhum turno PAUSADO para retomar.")
     shift.status = "ACTIVE"
     db.add(models.ShiftLog(shift_id=shift.id, event_type="RESUME"))
@@ -137,8 +147,13 @@ def resume_shift(current_driver: models.Driver = Depends(get_current_driver), db
 
 @app.post("/shifts/end", response_model=schemas.ShiftResponse, tags=["Turnos"])
 def end_shift(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
-    if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto.")
+    # CORREÇÃO VITAL: Evita o .in_() e garante a seleção do turno exato
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status != "ENDED"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
+    if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto para encerrar.")
     shift.status = "ENDED"
     shift.end_time = datetime.now(timezone.utc)
     db.add(models.ShiftLog(shift_id=shift.id, event_type="END"))
@@ -150,7 +165,11 @@ def end_shift(current_driver: models.Driver = Depends(get_current_driver), db: S
 
 @app.post("/shifts/gps", tags=["Ingestão de Dados"])
 def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status == "ACTIVE").first()
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status == "ACTIVE"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=400, detail="Turno inativo. GPS ignorado.")
 
     last_log = db.query(models.ShiftLog).filter(
@@ -185,7 +204,11 @@ def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Dr
 
 @app.post("/rides/", response_model=schemas.RideResponse, status_code=201, tags=["Ingestão de Dados"])
 def create_ride(ride: schemas.RideCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status != "ENDED"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto para atrelar a corrida.")
 
     new_ride = models.Ride(
@@ -206,7 +229,11 @@ def create_ride(ride: schemas.RideCreate, current_driver: models.Driver = Depend
 
 @app.get("/shifts/current/radar", response_model=schemas.RadarResponse, tags=["Contabilidade"])
 def get_earnings_radar(current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
+    shift = db.query(models.Shift).filter(
+        models.Shift.driver_id == current_driver.id, 
+        models.Shift.status != "ENDED"
+    ).order_by(models.Shift.created_at.desc()).first()
+    
     if not shift: raise HTTPException(status_code=404, detail="Inicie um turno para ver o radar.")
 
     profile = db.query(models.FinancialProfile).filter(models.FinancialProfile.driver_id == current_driver.id).first()
