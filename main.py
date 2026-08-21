@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Optional, List
 import secrets
 import hashlib 
-import math # Para os cálculos de precisão do GPS
+import math
 
 from database import engine, Base, get_db
 import models
@@ -14,7 +14,7 @@ import schemas
 
 Base.metadata.create_all(bind=engine)
 
-app = FastAPI(title="KMetrix API", version="1.2.0")
+app = FastAPI(title="KMetrix API", version="1.3.0")
 
 API_KEY_NAME = "X-API-Key"
 api_key_header = APIKeyHeader(name=API_KEY_NAME, auto_error=True)
@@ -28,9 +28,8 @@ def get_current_driver(
         raise HTTPException(status_code=401, detail="Acesso negado. X-API-Key inválida.")
     return driver
 
-# Função matemática (Haversine) para calcular distância em KM entre duas coordenadas GPS
 def calculate_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
-    R = 6371.0 # Raio da Terra em KM
+    R = 6371.0
     dlat = math.radians(lat2 - lat1)
     dlon = math.radians(lon2 - lon1)
     a = math.sin(dlat / 2)**2 + math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * math.sin(dlon / 2)**2
@@ -55,6 +54,28 @@ def create_driver(driver: schemas.DriverCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(new_driver)
     return new_driver
+
+# NOVO: Rota de Autenticação / Login
+@app.post("/auth/login", response_model=schemas.LoginResponse, tags=["Setup"])
+def login_driver(credentials: schemas.DriverLogin, db: Session = Depends(get_db)):
+    """
+    Autentica um motorista existente e devolve a X-API-Key para ser salva no celular.
+    """
+    # 1. Busca o motorista pelo e-mail
+    driver = db.query(models.Driver).filter(models.Driver.email == credentials.email).first()
+    
+    if not driver:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+
+    # 2. Aplica o mesmo hash na senha enviada para comparação
+    hashed_pwd = hashlib.sha256(credentials.password.encode()).hexdigest()
+    
+    # 3. Compara com a senha salva no banco
+    if driver.hashed_password != hashed_pwd:
+        raise HTTPException(status_code=401, detail="Credenciais inválidas.")
+
+    # 4. Retorna a chave se o login for bem sucedido
+    return {"api_key": driver.api_key}
 
 # === PERFIL FINANCEIRO ===
 @app.get("/financial-profile/", response_model=schemas.FinancialProfileResponse, tags=["Financeiro"])
@@ -129,13 +150,9 @@ def end_shift(current_driver: models.Driver = Depends(get_current_driver), db: S
 
 @app.post("/shifts/gps", tags=["Ingestão de Dados"])
 def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    """
-    O app bate aqui a cada X segundos. O back-end calcula a distância real percorrida e soma no Km Vazio ou Pago.
-    """
     shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status == "ACTIVE").first()
     if not shift: raise HTTPException(status_code=400, detail="Turno inativo. GPS ignorado.")
 
-    # Busca o último registro de GPS deste turno para calcular a distância
     last_log = db.query(models.ShiftLog).filter(
         models.ShiftLog.shift_id == shift.id,
         models.ShiftLog.event_type == "GPS_TICK",
@@ -147,15 +164,13 @@ def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Dr
     if last_log:
         distance = calculate_distance(float(last_log.latitude), float(last_log.longitude), gps_data.latitude, gps_data.longitude)
         
-        # Só contabiliza se a distância for razoável (evita bugs de GPS pulando para a África e voltando)
-        if distance < 5.0:  # Assumindo que num "tick" curto o carro andou no máximo 5km
+        if distance < 5.0:  
             shift.total_km = float(shift.total_km) + distance
             if gps_data.is_paid_route:
                 shift.paid_km = float(shift.paid_km) + distance
             else:
                 shift.empty_km = float(shift.empty_km) + distance
 
-    # Salva o novo log
     new_log = models.ShiftLog(
         shift_id=shift.id,
         event_type="GPS_TICK",
@@ -170,9 +185,6 @@ def register_gps_tick(gps_data: schemas.GpsTickCreate, current_driver: models.Dr
 
 @app.post("/rides/", response_model=schemas.RideResponse, status_code=201, tags=["Ingestão de Dados"])
 def create_ride(ride: schemas.RideCreate, current_driver: models.Driver = Depends(get_current_driver), db: Session = Depends(get_db)):
-    """
-    O app lê a tela e envia os dados da corrida (aceita, recusada, cancelada).
-    """
     shift = db.query(models.Shift).filter(models.Shift.driver_id == current_driver.id, models.Shift.status.in_(["ACTIVE", "PAUSED"])).first()
     if not shift: raise HTTPException(status_code=400, detail="Nenhum turno aberto para atrelar a corrida.")
 
