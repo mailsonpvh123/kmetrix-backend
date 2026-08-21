@@ -26,6 +26,15 @@ class DriverCreate(BaseModel):
     email: EmailStr = Field(...)
     password: str = Field(..., min_length=6)
 
+# NOVO: Schema para validar os dados recebidos no momento do login
+class DriverLogin(BaseModel):
+    email: EmailStr = Field(...)
+    password: str = Field(..., min_length=6)
+
+# NOVO: Schema para retornar apenas a chave da API após o login com sucesso
+class LoginResponse(BaseModel):
+    api_key: str
+
 class DriverResponse(BaseModel):
     id: UUID
     name: str
@@ -54,7 +63,6 @@ class ShiftLogCreate(BaseModel):
     longitude: Optional[float] = None
     is_paid_route: bool = False
 
-# NOVO: Schema para o envio do GPS a cada X segundos
 class GpsTickCreate(BaseModel):
     latitude: float = Field(..., description="Latitude atual")
     longitude: float = Field(..., description="Longitude atual")
